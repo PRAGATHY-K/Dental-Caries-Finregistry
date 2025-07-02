@@ -103,5 +103,95 @@ saveRDS(cohort_cens,
         file.path(DATA_WORK, "cohort_censored.rds"),
         compress = "xz")
 
+
+
+
+
+-------------------------------------------------------------------------------
+## ────────────────────────────────────────────────────────────────────
+##  Script   : 03_add_ecc_event.R
+##  Purpose  : Stream detailed_longitudinal register once to find the
+##             earliest ICD-10 K02 (dental caries) per child and merge
+##             into censored cohort.
+##  Inputs   :   • Data_wrk/cohort_censored.rds
+##               • RAW_ROOT/detailed_longitudinal.csv.gz
+##  Outputs  : data_work/cohort_ecc.rds
+##  Author   : Pragathy Kannan
+Updated  : 2025-07-01
+## ────────────────────────────────────────────────────────────────────
+library(data.table)
+library(lubridate)
+
+RAW_ROOT  <- Sys.getenv("RAW_DATA_PATH")
+DATA_WORK <- Sys.getenv("DATA_WORK")
+
+cohort_cens <- readRDS(file.path(DATA_WORK, "cohort_censored.rds"))
+setDT(cohort_cens)[ , FINREGISTRYID := as.character(FINREGISTRYID)]
+
+dl_file <- file.path(RAW_ROOT, "detailed_longitudinal.csv.gz")
+
+# ---- 1  Detect column positions (header only) ------------------------------
+hdr   <- readLines(pipe(sprintf("gzip -dc %s | head -n 1", shQuote(dl_file))), 1)
+cols  <- strsplit(hdr, ",")[[1]]
+pos   <- match(tolower(
+                 c("finregistryid","event_day","source","code1")),
+               tolower(cols))
+if (anyNA(pos))
+  stop("Required columns not found in detailed_longitudinal header.")
+
+# ---- 2  Stream only those 4 columns via gzip + cut -------------------------
+cmd <- sprintf("gzip -dc %s | cut -d',' -f%s",
+               shQuote(dl_file), paste(pos, collapse = ","))
+
+dl_small <- fread(
+  cmd = cmd,
+  sep = ",",
+  col.names = c("FINREGISTRYID","event_day","source","code1"),
+  showProgress = TRUE
+)
+
+# ---- 3  Earliest primary-care K02 per child ---------------------------------
+ecc <- dl_small[
+          source == "PRIM_OUT" & grepl("^K02", code1),
+          .(ecc_date = min(ymd(event_day))),
+          by = FINREGISTRYID
+       ]
+
+saveRDS(ecc,
+        file.path(DATA_WORK, "ecc_icd_only.rds"),
+        compress = "xz")
+
+# ---- 4  Merge into cohort & derive analysis fields -------------------------
+cohort_ecc <- merge(
+  cohort_cens, ecc,
+  by = "FINREGISTRYID", all.x = TRUE
+)
+
+## 4a age at event (years)
+cohort_ecc[ ,
+  age_at_ecc := as.numeric((ecc_date - birth_date) / dyears(1))
+]
+
+## 4b event indicator and survival time
+cohort_ecc[ ,
+  ecc_event := !is.na(ecc_date) & age_at_ecc < 6
+]
+
+cohort_ecc[ ,
+  time_to_event := fifelse(
+    ecc_event,
+    as.integer(ecc_date - birth_date),   # days to first ECC
+    as.integer(fu_end   - birth_date)    # days to censoring
+  )
+]
+
+# ---- 5  Save final analysis set --------------------------------------------
+saveRDS(cohort_ecc,
+        file.path(DATA_WORK, "cohort_ecc.rds"),
+        compress = "xz")
+
+cat("✓  cohort_ecc.rds saved –", nrow(cohort_ecc),
+    "children (ECC events:", sum(cohort_ecc$ecc_event), ")\n")
+
 cat("✓  cohort_censored.rds saved –",
     nrow(cohort_cens), "children\n")
