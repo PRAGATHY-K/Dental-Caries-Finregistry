@@ -41,3 +41,67 @@ saveRDS(birth,
         compress = "xz")
 
 cat("✓  studypop.rds saved with", nrow(birth), "rows\n")
+
+
+
+----------------------------------------------------------------------
+
+##  Script   : 02_add_death_censor.R
+##  Purpose  : Merge Central Death Register to birth cohort and create
+##             per-child censoring date (min[birth+6 y, death]).
+##  Inputs   :   • data_work/studypop.rds        (built in 01 script)
+##               • RAW_ROOT/sf_death/sf_death_2023.csv.gz
+##  Outputs  : data_work/cohort_censored.rds
+##  Author   : Pragathy Kannan
+##  Updated  : 2025-07-01
+## ────────────────────────────────────────────────────────────────────
+library(data.table)
+library(lubridate)
+
+# ---- 0  Paths ---------------------------------------------------------------
+RAW_ROOT  <- Sys.getenv("RAW_DATA_PATH")          # /media/volume/tmp_data/FinRegistry_2024Q1
+DATA_WORK <- Sys.getenv("DATA_WORK")              # ~/projects/dental_caries/data_work
+dir.create(DATA_WORK, showWarnings = FALSE, recursive = TRUE)
+
+birth_file  <- file.path(DATA_WORK, "studypop.rds")
+death_file  <- file.path(RAW_ROOT, "sf_death", "sf_death_2023.csv.gz")
+
+# ---- 1  Read birth cohort ---------------------------------------------------
+birth <- readRDS(birth_file)          # 320 k rows, already a data.frame
+setDT(birth)
+
+# ---- 2  Read & tidy death register -----------------------------------------
+## Death file stores only YEAR (KVUOSI).  Assume death occurred
+## on 31-Dec of that year – conservative censoring.
+death <- fread(
+  death_file,
+  sep    = ";",
+  select = c("TNRO", "KVUOSI")        # TNRO = FINREGISTRYID, KVUOSI = year
+)[
+  , .(
+      FINREGISTRYID = as.character(TNRO),
+      death_date    = ymd(sprintf("%d-12-31", KVUOSI))
+  )
+]
+
+# ---- 3  Merge & create censoring date --------------------------------------
+birth[ , FINREGISTRYID := as.character(FINREGISTRYID)]  # unify type
+
+cohort_cens <- merge(
+  birth, death,
+  by   = "FINREGISTRYID",
+  all.x = TRUE                 # keep every child (NA death = alive)
+)
+
+## Follow-up ends at earlier of 6th birthday OR death
+cohort_cens[ ,
+  fu_end := pmin(birth_date + years(6), death_date, na.rm = TRUE)
+]
+
+# ---- 4  Save ---------------------------------------------------------------
+saveRDS(cohort_cens,
+        file.path(DATA_WORK, "cohort_censored.rds"),
+        compress = "xz")
+
+cat("✓  cohort_censored.rds saved –",
+    nrow(cohort_cens), "children\n")
